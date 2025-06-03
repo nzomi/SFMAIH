@@ -1,3 +1,3 @@
 # dataset
 
-from .dataloader import AbdSeqData
+from .dataloader import AbdSeqDataset

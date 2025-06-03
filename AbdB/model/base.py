@@ -26,3 +26,21 @@ class BaseModel(nn.Module, ABC, HparamsBase):
     @abstractmethod
     def forward(self):
         pass
+
+class EncoderRegistry:
+    def __init__(self):
+        self._encoders = {}
+
+    def register(self, name):
+        def decorator(cls):
+            self._encoders[name.lower()] = cls
+            return cls
+        return decorator
+
+    def get(self, name):
+        return self._encoders[name.lower()]()
+
+    def list(self):
+        return list(self._encoders.keys())
+
+ENCODER_REGISTRY = EncoderRegistry()
