@@ -10,6 +10,10 @@ sys.path.append(str(Path(__file__).parent))
 sys.path.append(str(Path(__file__).parent.parent))
 
 import argparse
+from config import BaseConfig
+from model.encoder import *
+from src.localizer import LocalizerTrainer
+from dataset.dataloader import build_abd_dataloader, build_abd_dataset
 
 def set_seed(seed=42):
     torch.manual_seed(seed)
@@ -21,21 +25,30 @@ def set_seed(seed=42):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-def run(rank, world_size, model_name, data_name):
-    config = None
-    model = None
-    dataset = None
-    trainer = None
+def run(rank, world_size, model_name):
+    excel_path = '/home/liyuan.jiang/workspace/SFMAIH/AbdB/data/data.xlsx'
+    data_path = '/home/liyuan.jiang/workspace/SFMAIH/AbdB/data/seq'
+    config = BaseConfig.load_config(model_name)
+    model = LocalizerEncoder()
+    dataset = build_abd_dataset(
+        data_dir=data_path,
+        excel_path=excel_path,
+        batch_size=1,
+        shuffle=True,
+        preload=False,  
+        verbose=False     
+    )
+    trainer = LocalizerTrainer(config)
 
     trainer.setup_distributed(rank, world_size)
-    trainer.main(model, dataset, log_graph=True)
+    trainer.main(model, dataset, log_graph=False)
     trainer.cleanup_distributed()
     
 
-def train_distributed(world_size, model_name, dataset):
+def train_distributed(world_size, model_name):
     mp.spawn(
         run,
-        args=(world_size, model_name, dataset,),
+        args=(world_size, model_name,),
         nprocs=world_size,
         join=True
     )
@@ -53,7 +66,7 @@ def main():
 def debug():
     import os
     os.environ['CUDA_VISIBLE_DEVICES']='1'
-    pass
+    train_distributed(1, 'localizer')
 
 if __name__=='__main__':
     set_seed()

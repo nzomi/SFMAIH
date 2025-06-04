@@ -92,7 +92,7 @@ def load_dcm_as_tensor_batch_by_ser(dcm_paths, reference_ser_name=None, hu_range
             tensor_list = [normalize_image(img, hu_range=hu_range) for img in images]
             batch_tensor = torch.stack(tensor_list)
             stacked_tensors[ser_name] = batch_tensor
-            ser_orientation_info[ser_name] = ser_orientations[ser_name]
+            ser_orientation_info[ser_name] = torch.tensor(ser_orientations[ser_name])
 
             unique_orient = set(tuple(o) for o in ser_orientations[ser_name])
             logger.info(f"Ser {ser_name}: shape={batch_tensor.shape}, orientations={unique_orient}")

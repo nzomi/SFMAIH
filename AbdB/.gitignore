@@ -1,6 +1,6 @@
 runs
 weights
 data
-log.*
+log
 test.ipynb
 **__pycache__**

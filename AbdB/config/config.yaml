@@ -1,0 +1,12 @@
+localizer:
+  model_name: localizer
+  batch_size: 1
+  epochs: 10
+  valid_freq: 5
+  lr: !!float 1e-3
+  save_path: null
+  params:
+    dim_in: 3
+    dim_ff: 16
+    dim_out: 64
+    ser: ['Ser1a', 'Ser1b', 'Ser1c']

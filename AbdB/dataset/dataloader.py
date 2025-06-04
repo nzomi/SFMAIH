@@ -5,9 +5,14 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 import os
 import pandas as pd
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from collections import defaultdict
 from util.func import load_dcm_as_tensor_batch_from_dir
+
+import torch
+import torch.nn.functional as F
+
+import math
 
 def excel2label_dict(excel_path, sheet_name, keys):
     df = pd.read_excel(excel_path, sheet_name=sheet_name)
@@ -35,15 +40,31 @@ def collect_dataset(data_dir, label_dict):
         })
     return dataset
 
+def resize_localizer_tensor(localizer_tensor, target_size=(256, 256)):
+    # localizer_tensor: [B, C, H, W]
+    if localizer_tensor.shape[-2:] != target_size:
+        localizer_tensor = F.interpolate(
+            localizer_tensor, size=target_size, mode='bilinear', align_corners=False
+        )
+    return localizer_tensor
+
 class AbdSeqDataset(Dataset):
     def __init__(self, dataset_entries, preload=False, verbose=False):
         self.data = dataset_entries
         self.preload = preload
         self.verbose = verbose
+        self.required_localizer_sers = ['Ser1a', 'Ser1b', 'Ser1c']
+
         if preload:
             for entry in self.data:
                 for sub_name, sub_path in entry['sub_seq_paths'].items():
-                    entry['sub_seq_paths'][sub_name] = load_dcm_as_tensor_batch_from_dir(sub_path)
+                    tensor_dict, orientation = load_dcm_as_tensor_batch_from_dir(sub_path)
+
+                    if sub_name.lower().startswith("localizer"):
+                        stacked_tensor = self._process_and_stack_localizer(tensor_dict)
+                        entry['sub_seq_paths'][sub_name] = (stacked_tensor, orientation)
+                    else:
+                        entry['sub_seq_paths'][sub_name] = (tensor_dict, orientation)
 
     def __len__(self):
         return len(self.data)
@@ -53,19 +74,40 @@ class AbdSeqDataset(Dataset):
         seq_id = entry['seq']
         label = entry['label']
         sub_data = {}
+
         for sub_name, sub_path in entry['sub_seq_paths'].items():
             if self.preload:
-                sub_data[sub_name] = sub_path  # already loaded tensors
+                sub_data[sub_name] = sub_path  # already processed
             else:
-                sub_data[sub_name] = load_dcm_as_tensor_batch_from_dir(sub_path)
+                tensor_dict, orientation = load_dcm_as_tensor_batch_from_dir(sub_path)
+                if sub_name.lower().startswith("localizer"):
+                    stacked_tensor = self._process_and_stack_localizer(tensor_dict)
+                    sub_data[sub_name] = (stacked_tensor, orientation)
+                else:
+                    sub_data[sub_name] = (tensor_dict, orientation)
+
             if self.verbose:
-                print(f"[{seq_id}] Loaded {sub_name} from {sub_path}")
+                print(f"[{seq_id}] Loaded {sub_name}")
 
         return {
             'seq': seq_id,
             'label': label,
             'sub_seq': sub_data
         }
+
+    def _process_and_stack_localizer(self, tensor_dict):
+        tensors = defaultdict()
+        stack_tensors = []
+        for ser_name in self.required_localizer_sers:
+            t = tensor_dict.get(ser_name)
+            if t is None:
+                raise ValueError(f"Missing localizer series: {ser_name}")
+            if t.shape[-2:] != (256, 256):
+                t = F.interpolate(t.float(), size=(256, 256), mode='bilinear', align_corners=False)
+            tensors[ser_name] = t
+            stack_tensors.append(t)
+        tensors['Stack'] = torch.cat(stack_tensors, dim=1)
+        return tensors
 
 def custom_collate(batch):
     return {
@@ -80,9 +122,52 @@ def build_abd_dataloader(data_dir, excel_path, sheet_name='processed', keys=['nu
     label_dict = excel2label_dict(excel_path, sheet_name, keys)
     dataset_entries = collect_dataset(data_dir, label_dict)
     dataset = AbdSeqDataset(dataset_entries, preload=preload, verbose=verbose)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+    # dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+    #                         num_workers=num_workers, collate_fn=custom_collate)
+
+    total_size = len(dataset)
+    val_size = math.floor(0.1 * total_size)
+    train_size = total_size - val_size
+
+    torch.manual_seed(42)  
+    train_set, val_set = random_split(dataset, [train_size, val_size])
+
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=shuffle,
+                              num_workers=num_workers, collate_fn=custom_collate)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False,
                             num_workers=num_workers, collate_fn=custom_collate)
-    return dataloader
+
+    return train_loader, val_loader
+
+def build_abd_dataset(data_dir, excel_path, sheet_name='processed', keys=['num', 'label'],
+                          batch_size=1, shuffle=True, num_workers=0,
+                          preload=False, verbose=False):
+    label_dict = excel2label_dict(excel_path, sheet_name, keys)
+    dataset_entries = collect_dataset(data_dir, label_dict)
+    dataset = AbdSeqDataset(dataset_entries, preload=preload, verbose=verbose)
+    # dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+    #                         num_workers=num_workers, collate_fn=custom_collate)
+
+    total_size = len(dataset)
+    val_size = math.floor(0.1 * total_size)
+    train_size = total_size - val_size
+
+    torch.manual_seed(42)  
+    train_set, val_set = random_split(dataset, [train_size, val_size])
+
+    return train_set, val_set
+
+import logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+file_handler = logging.FileHandler('log_data.txt', mode='w')  
+file_handler.setLevel(logging.INFO)
+
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
 
 if __name__ == '__main__':
     excel_path = 'data/data.xlsx'
@@ -91,7 +176,7 @@ if __name__ == '__main__':
     excel_path = '/home/liyuan.jiang/workspace/SFMAIH/AbdB/data/data.xlsx'
     data_path = '/home/liyuan.jiang/workspace/SFMAIH/AbdB/data/seq'
     
-    dataloader = build_abd_dataloader(
+    train_ds, val_ds = build_abd_dataloader(
         data_dir=data_path,
         excel_path=excel_path,
         batch_size=1,
@@ -100,21 +185,25 @@ if __name__ == '__main__':
         verbose=False     
     )
 
+    for batch in train_ds:
+        logger.info(f'Seq number: {batch["seq"]}')
+        if 't1' not in batch['sub_seq'].keys():
+            logger.info('miss t1')
+        if 't2' not in batch['sub_seq'].keys():
+            logger.info('miss t2')
+
+        for sub_seq, seq_tensor in batch['sub_seq'].items():
+            if sub_seq in ['localizer']:# ['t1', 't2', 'localizer']:
+                for ser_name, ser_tensor in seq_tensor[0].items():
+                    logger.info(f'{sub_seq}, {ser_name}, shape: {ser_tensor.shape} ')
+        logger.info('####################')
+
+
+    # all_modalities = set()
+
     # for batch in dataloader:
-    #     if 't1' not in batch['sub_seq'].keys():
-    #         print(batch['seq'], 'miss t1')
-    #     if 't2' not in batch['sub_seq'].keys():
-    #         print(batch['seq'], 'miss t2')
-    #     if 'localizer' not in batch['sub_seq'].keys():
-    #         print(batch['seq'], 'miss localizer')
-    #     print('####################')
+    #     modalities = set(batch['sub_seq'].keys())
+    #     all_modalities.update(modalities)
 
-
-    all_modalities = set()
-
-    for batch in dataloader:
-        modalities = set(batch['sub_seq'].keys())
-        all_modalities.update(modalities)
-
-    print("All observed modalities:", all_modalities)
+    # print("All observed modalities:", all_modalities)
         
