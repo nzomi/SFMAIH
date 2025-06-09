@@ -82,7 +82,19 @@ class AbdSeqDataset(Dataset):
                 tensor_dict, orientation = load_dcm_as_tensor_batch_from_dir(sub_path)
                 if sub_name.lower().startswith("localizer"):
                     stacked_tensor = self._process_and_stack_localizer(tensor_dict)
+                    if stacked_tensor is None:
+                        continue
                     sub_data[sub_name] = (stacked_tensor, orientation)
+                elif sub_name.lower().startswith("t1"):
+                    stacked_tensor, stacked_orientation = self._process_and_stack_t1(tensor_dict, orientation)
+                    if stacked_tensor is None:
+                        continue
+                    sub_data[sub_name] = (stacked_tensor, stacked_orientation)
+                elif sub_name.lower().startswith("t2"):
+                    stacked_tensor, stacked_orientation = self._process_and_stack_t2(tensor_dict, orientation)
+                    if stacked_tensor is None:
+                        continue
+                    sub_data[sub_name] = (stacked_tensor, stacked_orientation)
                 else:
                     sub_data[sub_name] = (tensor_dict, orientation)
 
@@ -101,13 +113,52 @@ class AbdSeqDataset(Dataset):
         for ser_name in self.required_localizer_sers:
             t = tensor_dict.get(ser_name)
             if t is None:
-                raise ValueError(f"Missing localizer series: {ser_name}")
+                # raise ValueError(f"Missing localizer series: {ser_name}")
+                return None
             if t.shape[-2:] != (256, 256):
                 t = F.interpolate(t.float(), size=(256, 256), mode='bilinear', align_corners=False)
             tensors[ser_name] = t
             stack_tensors.append(t)
         tensors['Stack'] = torch.cat(stack_tensors, dim=1)
         return tensors
+    
+    def _process_and_stack_t1(self, tensor_dict, orientations):
+        tensors = defaultdict()
+        stack_tensors = []
+        orientation = []
+        for ser_name in tensor_dict.keys():
+            t = tensor_dict.get(ser_name)
+            if len(t) <= 1:
+                continue
+            if t is None:
+                # raise ValueError(f"Missing localizer series: {ser_name}")
+                return None
+            if t.shape[-2:] != (320, 320):
+                t = F.interpolate(t.float(), size=(320, 320), mode='bilinear', align_corners=False)
+            tensors[ser_name] = t
+            stack_tensors.append(t)
+            orientation.append(orientations[ser_name])
+        # tensors['Stack'] = torch.cat(stack_tensors, dim=1)
+        return stack_tensors, orientation
+    
+    def _process_and_stack_t2(self, tensor_dict, orientations):
+        tensors = defaultdict()
+        stack_tensors = []
+        orientation = []
+        for ser_name in tensor_dict.keys():
+            t = tensor_dict.get(ser_name)
+            if len(t) <= 1:
+                continue
+            if t is None:
+                # raise ValueError(f"Missing localizer series: {ser_name}")
+                return None
+            if t.shape[-2:] != (384, 384):
+                t = F.interpolate(t.float(), size=(384, 384), mode='bilinear', align_corners=False)
+            tensors[ser_name] = t
+            stack_tensors.append(t)
+            orientation.append(orientations[ser_name])
+        # tensors['Stack'] = torch.cat(stack_tensors, dim=1)
+        return stack_tensors, orientation
 
 def custom_collate(batch):
     return {
@@ -193,9 +244,14 @@ if __name__ == '__main__':
             logger.info('miss t2')
 
         for sub_seq, seq_tensor in batch['sub_seq'].items():
-            if sub_seq in ['localizer']:# ['t1', 't2', 'localizer']:
-                for ser_name, ser_tensor in seq_tensor[0].items():
-                    logger.info(f'{sub_seq}, {ser_name}, shape: {ser_tensor.shape} ')
+            if sub_seq in ['t1']:# ['t1', 't2', 'localizer']:
+                for ser_tensor in seq_tensor[0]:
+                    logger.info(f'{sub_seq}, shape: {ser_tensor.shape} ')
+            
+            elif sub_seq in ['t2']:# ['t1', 't2', 'localizer']:
+                for ser_tensor in seq_tensor[0]:
+                    logger.info(f'{sub_seq}, shape: {ser_tensor.shape} ')
+            
         logger.info('####################')
 
 

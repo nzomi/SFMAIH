@@ -12,7 +12,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 import argparse
 from config import BaseConfig
 from model.encoder import *
-from src.localizer import LocalizerTrainer
+from model.model import *
+from src.localizer import ModelTrainer
 from dataset.dataloader import build_abd_dataloader, build_abd_dataset
 
 def set_seed(seed=42):
@@ -29,7 +30,8 @@ def run(rank, world_size, model_name):
     excel_path = '/home/liyuan.jiang/workspace/SFMAIH/AbdB/data/data.xlsx'
     data_path = '/home/liyuan.jiang/workspace/SFMAIH/AbdB/data/seq'
     config = BaseConfig.load_config(model_name)
-    model = LocalizerEncoder()
+    model = MultiModalNet(hidden_dim=64, modalities=['t1', 't2', 'localizer'])
+    # model = LocalizerEncoder3D()
     dataset = build_abd_dataset(
         data_dir=data_path,
         excel_path=excel_path,
@@ -38,7 +40,7 @@ def run(rank, world_size, model_name):
         preload=False,  
         verbose=False     
     )
-    trainer = LocalizerTrainer(config)
+    trainer = ModelTrainer(config)
 
     trainer.setup_distributed(rank, world_size)
     trainer.main(model, dataset, log_graph=False)
@@ -65,8 +67,8 @@ def main():
 
 def debug():
     import os
-    os.environ['CUDA_VISIBLE_DEVICES']='1'
-    train_distributed(1, 'localizer')
+    os.environ['CUDA_VISIBLE_DEVICES']='0'
+    train_distributed(1, 'multimodal')
 
 if __name__=='__main__':
     set_seed()

@@ -1,9 +1,15 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent.parent))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchinfo import summary
 from model.base import ENCODER_REGISTRY
 from einops.layers.torch import Rearrange
+from einops import rearrange
 from icecream import ic
 import math
 
@@ -18,24 +24,89 @@ class RotateEncoder(nn.Module):
 
     def forward(self, x):
         return self.layers(x)
+    
+class SliceEncoder(nn.Module):
+    def __init__(self, dim_out=64):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Conv2d(1, 16, 3, 1, 1),
+            nn.LeakyReLU(),
+            nn.AdaptiveAvgPool2d(1)
+        )
+        self.fc = nn.Linear(16, dim_out)
+
+    def forward(self, x):
+        feat = self.backbone(x).view(x.size(0), -1)
+        res = self.fc(feat)
+        # ic(feat.shape, res.shape)
+        return res
+    
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=512):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # (1, max_len, d_model)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x: (B, N, D)
+        # ic(x.shape)
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
+
+class SliceFuser(nn.Module):
+    def __init__(self, dim_in=64, dim_hidden=256, heads=4):
+        super().__init__()
+        encoder_layers = nn.TransformerEncoderLayer(d_model=dim_in, nhead=heads, dim_feedforward=dim_hidden)
+        self.pos_embd = PositionalEncoding(d_model=dim_in)
+        self.transformer = nn.TransformerEncoder(encoder_layers, num_layers=3)
+
+    def forward(self, x):
+        embed = self.pos_embd(x)
+        # ic(embed.shape)
+        out = self.transformer(x + embed)
+        return out.mean(dim=0)
 
 @ENCODER_REGISTRY.register('t1')
 class T1Encoder(nn.Module):
     def __init__(self):
         super().__init__()
-        pass
+        self.slice_encoder = SliceEncoder()
+        self.slice_fuser = SliceFuser()
 
-    def forward(self):
-        pass
+    def forward(self, sers):
+        ser_feats = []
+        for ser in sers[0]:
+            slice_feats = self.slice_encoder(ser)
+            ts_output = self.slice_fuser(slice_feats.unsqueeze(1))
+            ser_feats.append(ts_output)
+        res = torch.stack(ser_feats)
+        return res.mean(dim=0)
 
 @ENCODER_REGISTRY.register('t2')
 class T2Encoder(nn.Module):
     def __init__(self):
         super().__init__()
-        pass
+        self.slice_encoder = SliceEncoder()
+        self.slice_fuser = SliceFuser()
 
-    def forward(self):
-        pass
+    def forward(self, sers):
+        ser_feats = []
+        for ser in sers[0]:
+            slice_feats = self.slice_encoder(ser)
+            ts_output = self.slice_fuser(slice_feats.unsqueeze(1))
+            ser_feats.append(ts_output)
+        res = torch.stack(ser_feats)
+        return res.mean(dim=0)
 
 @ENCODER_REGISTRY.register('localizer')
 class LocalizerEncoder(nn.Module):
@@ -50,11 +121,7 @@ class LocalizerEncoder(nn.Module):
             RotateEncoder(6, dim_ff, dim_out) for _ in range(3)      # (B, 5) --> broadcast (B, dim_out)
         ])
 
-        self.enc_stack = nn.Sequential(
-            nn.Conv2d(dim_in, dim_ff, 3, 2, 1),
-            nn.ReLU(),
-            nn.Conv2d(dim_ff, dim_in, 3, 2, 1)
-        )
+        self.enc_stack = LocalizerEncoder3D(dim_in)
 
         # self.enc_attn = AttentionFusion(dim_out)
         self.enc_attn = LightAttentionFusion()
@@ -67,9 +134,9 @@ class LocalizerEncoder(nn.Module):
 
         self.mlp = nn.Sequential(
             nn.Conv2d(1, 1, 3, 2, 1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Flatten(),
-            nn.LazyLinear(4)
+            nn.LazyLinear(64)
         )
     
     def forward(self, localizer_ser):
@@ -83,10 +150,15 @@ class LocalizerEncoder(nn.Module):
             encodings.append(enc)
         
         enc_fused = self.enc_attn(*encodings)
-        enc_stack = self.enc_stack(localizer_ser[0].get('Stack'))
-
+        enc_stack = self.enc_stack(localizer_ser)    # [1, 3, 1, 64, 64]
+        enc_stack = rearrange(enc_stack, 'b c d h w -> b (c d) h w')
+        enc_stack = enc_stack.expand(enc_fused.size(0), -1, -1, -1)
+        # ic(enc_fused.shape, enc_stack.shape)
         res = self.enc_fusion(torch.cat([enc_fused, enc_stack], dim=1))
-        return self.mlp(self.dropout(res))
+        res = res.sum(dim=0, keepdim=True)
+        # return self.dropout(res)
+        res = self.mlp(self.dropout(res))
+        return res
 
 
 class LocalizerEncBlock(nn.Module):
@@ -94,15 +166,15 @@ class LocalizerEncBlock(nn.Module):
         super().__init__()
         self.layers = nn.Sequential(
             nn.Conv2d(dim_in, 16, 3, padding=1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.MaxPool2d(2),
 
             nn.Conv2d(16, 32, 3, padding=1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.MaxPool2d(2),
 
             nn.Conv2d(32, dim_out, 3, padding=1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
         )
 
     def forward(self, x):
@@ -141,7 +213,7 @@ class LightAttentionFusion(nn.Module):
 
         self.attn = nn.Sequential(
             nn.Conv2d(in_channels, reduced_channels, kernel_size=1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Conv2d(reduced_channels, fusion_channels, kernel_size=1),
             nn.Softmax(dim=1) 
         )
@@ -154,7 +226,7 @@ class LightAttentionFusion(nn.Module):
         self.gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(in_channels, reduced_channels, 1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Conv2d(reduced_channels, fusion_channels, 1),
             nn.Sigmoid()
         )
@@ -172,9 +244,61 @@ class LightAttentionFusion(nn.Module):
         out = self.upsample(fused)         
         return out * gate
     
+
+@ENCODER_REGISTRY.register('localizer3d')
+class LocalizerEncoder3D(nn.Module):
+    def __init__(self, dim_in=3, dim_out=3, dropout=0.1):
+        super().__init__()
+
+        self.encoder3d = nn.Sequential(
+            nn.Conv3d(dim_in, 16, kernel_size=3, padding=1),
+            nn.BatchNorm3d(16),
+            nn.LeakyReLU(),
+            nn.MaxPool3d(2),  # [B, 16, D/2, H/2, W/2]
+
+            nn.Conv3d(16, 16, kernel_size=3, padding=1),
+            nn.BatchNorm3d(16),
+            nn.LeakyReLU(),
+            nn.MaxPool3d(2),  # [B, 32, D/4, H/4, W/4]
+
+            nn.Conv3d(16, dim_out, kernel_size=3, padding=1),
+            nn.BatchNorm3d(dim_out),
+            nn.LeakyReLU(),
+        )
+
+        self.dropout = nn.Dropout(dropout)
+
+        # self.head = nn.Sequential(
+        #     nn.AdaptiveAvgPool3d(1),
+        #     nn.Flatten(),
+        #     nn.Linear(dim_out, 4)
+        # )
+
+    def forward(self, localizer_ser):
+        x = localizer_ser[0].get('Stack')   # [7, 3, 256, 256]
+        # ser_tensors = [localizer_ser[0][k] for k in ['Ser1a', 'Ser1b', 'Ser1c']]
+        # x = torch.stack(localizer_ser, dim=1)  # [7, 3, 1, 256, 256]
+        x = rearrange(x, '(d b) c h w -> b c d h w', b=1)
+        feat = self.encoder3d(x)  # [1, dim_out, D', H', W']
+        feat = self.dropout(feat)
+        return feat
+        # out = self.head(feat)    # [1, 4]
+        # ic(out.shape, feat.shape)
+        # return out, feat
+
+    
 if __name__ == '__main__':
-    localiserencoder = LocalizerEncoder()
-    input_data=({'Ser1a': torch.empty(size=(7, 1, 256, 256)), 'Ser1b': torch.empty(size=(7, 1, 256, 256)), 'Ser1c': torch.empty(size=(7, 1, 256, 256)), 'Stack': torch.empty(size=(7, 3, 256, 256))},
-                {'Ser1a': torch.empty(size=(7, 6)), 'Ser1b': torch.empty(size=(7, 6)), 'Ser1c': torch.empty(size=(7, 6))})
+    # localizerencoder = LocalizerEncoder()
+    # localizerencoder3d = LocalizerEncoder3D()
+    # input_data=({'Ser1a': torch.empty(size=(7, 1, 256, 256)), 'Ser1b': torch.empty(size=(7, 1, 256, 256)), 'Ser1c': torch.empty(size=(7, 1, 256, 256)), 'Stack': torch.empty(size=(7, 3, 256, 256))},
+    #             {'Ser1a': torch.empty(size=(7, 6)), 'Ser1b': torch.empty(size=(7, 6)), 'Ser1c': torch.empty(size=(7, 6))})
     # localiserencoder(input_data)
-    summary(localiserencoder, input_data=(input_data,))
+    # summary(localizerencoder, input_data=(input_data,))
+    # summary(localizerencoder3d, input_data=(input_data,))
+
+    t1encoder = T1Encoder()
+    t1_data = [torch.empty(size=(20, 1, 320, 320)), torch.empty(size=(56, 1, 320, 320)), torch.empty(size=(42, 1, 320, 320))]
+    summary(t1encoder, input_data=(t1_data,))
+    t2encoder = T2Encoder()
+    t2_data = [torch.empty(size=(20, 1, 384, 384)), torch.empty(size=(56, 1, 384, 384)), torch.empty(size=(42, 1, 384, 384))]
+    summary(t2encoder, input_data=(t2_data,))

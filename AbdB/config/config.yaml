@@ -3,10 +3,25 @@ localizer:
   batch_size: 1
   epochs: 10
   valid_freq: 5
-  lr: !!float 1e-3
+  lr: !!float 1e-2
   save_path: null
   params:
     dim_in: 3
     dim_ff: 16
     dim_out: 64
     ser: ['Ser1a', 'Ser1b', 'Ser1c']
+
+multimodal:
+  model_name: multimodal
+  batch_size: 1
+  epochs: 10
+  valid_freq: 5
+  lr: !!float 1e-2
+  save_path: null
+  params:
+    hidden_dim: 128
+    modalities: ['t1', 't2', 'localizer']
+    # dim_in: 3
+    # dim_ff: 16
+    # dim_out: 64
+    # ser: ['Ser1a', 'Ser1b', 'Ser1c']

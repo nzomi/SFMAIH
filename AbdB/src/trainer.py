@@ -110,7 +110,7 @@ class BaseTrainer(ABC):
         )
 
         model = model.to(self.device)
-        model = DDP(model, device_ids=[self.local_rank], find_unused_parameters=False)
+        model = DDP(model, device_ids=[self.local_rank], find_unused_parameters=True)
 
         overall_loss = []
 
